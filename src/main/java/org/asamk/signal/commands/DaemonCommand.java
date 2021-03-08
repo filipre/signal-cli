@@ -10,6 +10,7 @@ import org.asamk.signal.JsonDbusReceiveMessageHandler;
 import org.asamk.signal.OutputType;
 import org.asamk.signal.commands.exceptions.CommandException;
 import org.asamk.signal.commands.exceptions.UnexpectedErrorException;
+import org.asamk.signal.dbus.DbusSignalControlImpl;
 import org.asamk.signal.dbus.DbusSignalImpl;
 import org.asamk.signal.manager.Manager;
 import org.freedesktop.dbus.connections.impl.DBusConnection;
@@ -80,7 +81,9 @@ public class DaemonCommand implements MultiLocalCommand {
     }
 
     @Override
-    public void handleCommand(final Namespace ns, final List<Manager> managers) throws CommandException {
+    public void handleCommand(
+            final Namespace ns, final List<Manager> managers, SignalCreator c
+    ) throws CommandException {
         var inJson = ns.get("output") == OutputType.JSON || ns.getBoolean("json");
 
         // TODO delete later when "json" variable is removed
@@ -98,18 +101,39 @@ public class DaemonCommand implements MultiLocalCommand {
         }
 
         try (var conn = DBusConnection.getConnection(busType)) {
-            var receiveThreads = new ArrayList<Thread>();
+            final var receiveThreads = new ArrayList<Thread>();
             for (var m : managers) {
                 var objectPath = DbusConfig.getObjectPath(m.getUsername());
                 var thread = run(conn, objectPath, m, ignoreAttachments, inJson);
                 receiveThreads.add(thread);
             }
 
+            if (c != null) {
+                conn.exportObject(DbusConfig.getObjectPath(), new DbusSignalControlImpl(c, m -> {
+                    var objectPath = DbusConfig.getObjectPath(m.getUsername());
+                    try {
+                        Thread thread = run(conn, objectPath, m, ignoreAttachments, inJson);
+                        synchronized (receiveThreads) {
+                            receiveThreads.add(thread);
+                        }
+                    } catch (DBusException e) {
+                        e.printStackTrace();
+                    }
+                }));
+            }
+
             conn.requestBusName(DbusConfig.getBusname());
 
-            for (var t : receiveThreads) {
+            while (true) {
+                final Thread thread;
+                synchronized (receiveThreads) {
+                    if (receiveThreads.size() == 0) {
+                        break;
+                    }
+                    thread = receiveThreads.remove(0);
+                }
                 try {
-                    t.join();
+                    thread.join();
                 } catch (InterruptedException ignored) {
                 }
             }
